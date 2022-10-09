@@ -1,0 +1,149 @@
+networks:
+    default:
+        name: rws
+
+    collaboration:
+        name: collaboration
+        external: true
+
+    data:
+        name: data
+        external: true
+
+    gateway:
+        name: gateway
+        external: true
+
+    security:
+        name: security
+        external: true
+
+    reverse-proxy:
+        name: reverse-proxy
+        external: true
+
+services:
+    wikijs:
+        image: requarks/wiki:2
+        container_name: wikijs
+        restart: ${RESTART_MODE:-unless-stopped}
+        expose: 
+            - 3000
+        networks:
+            - data
+            - reverse-proxy 
+        volumes:
+            - /var/lib/wikijs/data:/data
+            - /var/lib/wikijs/assets:/assets
+        environment:
+            DB_TYPE: postgres
+            DB_HOST: postgresql
+            DB_PORT: 5432
+            DB_NAME: ${WIKIJS_DB_NAME:-wikijs}
+            DB_USER: ${WIKIJS_DB_USERNAME:-wikijs}
+            DB_PASS: ${WIKIJS_DB_PASSWORD:-wikijs}
+        healthcheck:
+            retries: 10
+            timeout: 1s
+            interval: 3s
+            test: ["CMD-SHELL", curl --fail http://wikijs:3000 || exit 1]
+        depends_on:
+            postgresql: 
+                condition: service_healthy
+
+    postgresql:
+        image: postgres:14-alpine
+        container_name: postgresql
+        restart: ${RESTART_MODE:-unless-stopped}
+        networks:
+            - data 
+        volumes:
+            - /var/lib/postgresql:/var/lib/postgresql
+            - ./scripts/setup-database.sh:/docker-entrypoint-initdb.d/setup-database.sh
+        environment:
+            POSTGRES_DB: ${POSTGRESQL_DATABASE:-postgres}
+            POSTGRES_USER: ${POSTGRESQL_USERNAME:-postgres}
+            POSTGRES_PASSWORD: ${POSTGRESQL_PASSWORD:-postgres}
+        healthcheck:
+            retries: 10
+            timeout: 1s
+            interval: 3s
+            test: ["CMD-SHELL", "pg_isready -U ${POSTGRESQL_USERNAME-postgres}"]
+
+    redis: 
+        image: redis:7.0.5-alpine
+        container_name: redis
+        restart: ${RESTART_MODE:-unless-stopped}
+        command: redis-server --requirepass ${REDIS_PASSWORD:-redis}
+        networks: 
+            - data
+        healthcheck:
+            retries: 10
+            timeout: 1s
+            interval: 3s
+            test: ["CMD-SHELL", "redis-cli ping"]
+
+    vaultwarden:
+        image: vaultwarden/server:latest
+        container_name: vaultwarden
+        restart: ${RESTART_MODE:-unless-stopped}
+        expose: 
+            - 3011
+        networks:
+            - data
+            - reverse-proxy
+        volumes:
+            - /var/lib/vaultwarden:/data
+        environment:
+            ROCKET_PORT: 3011
+            ADMIN_TOKEN: ${ADMIN_TOKEN:-admin}
+            DISABLE_ADMIN_TOKEN: ${DISABLE_ADMIN:-false}
+            WEBSOCKET_ENABLED: ${WEBSOCKET_ENABLED:-true}
+            DATABASE_URL: postgresql://${POSTGRESQL_USERNAME:-vaultwarden}:${POSTGRESQL_PASSWORD:-vaultwarden}@postgresql:5432/${POSTGRESQL_DATABASE:-vaultwarden}
+        depends_on:
+            postgresql: 
+                condition: service_healthy
+
+    uptime-kuma:
+        image: louislam/uptime-kuma:alpine
+        container_name: uptime-kuma
+        restart: ${RESTART_MODE:-unless-stopped}
+        networks:
+            - reverse-proxy
+        volumes:
+            - /var/lib/uptime-kuma:/app/data
+
+    certbot:
+        image: certbot/certbot:latest
+        container_name: certbot
+        command: certonly -d wiki.rubrac.xyz -d nextcloud.rubrac.xyz -d vaultwarden.rubrac.xyz -m webmaster@rubrac.com --cert-name rubrac.xyz --standalone --agree-tos --non-interactive --register-unsafely-without-email
+        volumes:
+            - /etc/letsencrypt:/etc/letsencrypt
+            - /var/lib/letsencrypt:/var/lib/letsencrypt
+
+    nginx:
+        image: nginx:mainline
+        container_name: nginx
+        restart: ${RESTART_MODE:-unless-stopped}
+        networks:
+            - reverse-proxy 
+        ports:
+            - 80:80
+            - 443:443
+        volumes:
+            - /var/log/nginx:/var/log/nginx 
+            - /etc/nginx/sites:/etc/nginx/conf.d
+            - /etc/nginx/ssl.conf:/etc/nginx/ssl.conf
+            - /etc/nginx/headers.conf:/etc/nginx/headers.conf
+            - /etc/ssl/dhparam:/etc/ssl/dhparam:ro 
+            - /etc/letsencrypt/live/rubrac.xyz/fullchain.pem:/etc/ssl/certs/rubrac.xyz:ro 
+            - /etc/letsencrypt/live/rubrac.xyz/privkey.pem:/etc/ssl/private/rubrac.xyz:ro 
+        depends_on:        
+            wikijs: 
+                condition: service_healthy
+            vaultwarden: 
+                condition: service_healthy
+            uptime-kuma: 
+                condition: service_healthy
+            certbot: 
+                condition: service_completed_successfully
